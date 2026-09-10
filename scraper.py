@@ -1,4 +1,6 @@
 import os
+import re
+import mimetypes
 from datetime import datetime
 from telethon import TelegramClient
 from telethon.sessions import StringSession
@@ -12,9 +14,31 @@ API_HASH = os.environ["TELEGRAM_API_HASH"]
 SESSION_STRING = os.environ["TELEGRAM_SESSION"]
 CHANNEL_USERNAME = os.environ["TELEGRAM_CHANNEL"]  # e.g. "somechannel" (no @)
 
+# Only pick up links that actually point at a video file, not every URL
+# in the message (skip promo links, @channel mentions, t.me links, etc.)
+VIDEO_LINK_RE = re.compile(
+    r"https?://\S+?\.(?:mp4|mkv|avi|mov|m3u8|webm)(?:\?\S*)?",
+    re.IGNORECASE,
+)
+
 
 def build_client() -> TelegramClient:
     return TelegramClient(StringSession(SESSION_STRING), API_ID, API_HASH)
+
+
+def extract_video_links(text: str):
+    """
+    Returns a list of (url, label) pairs. `label` is whatever text shared
+    the line with the link (often a quality tag like "720p" or "Episode 3"),
+    stripped of the URL itself, so you get something usable as a title hint.
+    """
+    results = []
+    for line in text.splitlines():
+        for match in VIDEO_LINK_RE.finditer(line):
+            url = match.group(0)
+            label = line.replace(url, "").strip(" -:|\u2022\t")
+            results.append((url, label))
+    return results
 
 
 async def scrape_channel(limit: int = 200) -> int:
@@ -41,9 +65,9 @@ async def scrape_channel(limit: int = 200) -> int:
                 if msg.id in existing_ids:
                     continue
 
-                item = None
+                items_to_add = []
 
-                # Case 1: video/document media
+                # Case 1: video/document media actually uploaded to Telegram
                 if msg.media and isinstance(msg.media, MessageMediaDocument) and msg.document:
                     doc = msg.document
                     file_name = None
@@ -54,10 +78,10 @@ async def scrape_channel(limit: int = 200) -> int:
                         if isinstance(attr, DocumentAttributeVideo):
                             duration = attr.duration
 
-                    item = MediaItem(
+                    items_to_add.append(MediaItem(
                         channel_username=CHANNEL_USERNAME,
                         message_id=msg.id,
-                        title=(msg.text or file_name or f"Untitled #{msg.id}")[:200],
+                        title=(msg.text.splitlines()[0] if msg.text else file_name or f"Untitled #{msg.id}")[:200],
                         caption=msg.text,
                         media_type="video" if duration else "document",
                         file_name=file_name,
@@ -65,21 +89,31 @@ async def scrape_channel(limit: int = 200) -> int:
                         file_size=doc.size,
                         duration=duration,
                         date=msg.date.isoformat() if msg.date else None,
-                    )
+                    ))
 
-                # Case 2: plain text message containing a link, no media
-                elif msg.text and ("http://" in msg.text or "https://" in msg.text):
-                    item = MediaItem(
-                        channel_username=CHANNEL_USERNAME,
-                        message_id=msg.id,
-                        title=msg.text[:200],
-                        caption=msg.text,
-                        media_type="link",
-                        url=msg.text.strip(),
-                        date=msg.date.isoformat() if msg.date else None,
-                    )
+                # Case 2: plain text message with one or more direct video links
+                # (this will be the common case for most channels — .mp4/.mkv
+                # links to files hosted elsewhere, not uploaded to Telegram)
+                elif msg.text:
+                    links = extract_video_links(msg.text)
+                    base_title = msg.text.splitlines()[0][:200] if msg.text.strip() else f"Untitled #{msg.id}"
 
-                if item:
+                    for url, label in links:
+                        file_name = url.split("/")[-1].split("?")[0]
+                        mime_type, _ = mimetypes.guess_type(file_name)
+                        items_to_add.append(MediaItem(
+                            channel_username=CHANNEL_USERNAME,
+                            message_id=msg.id,
+                            title=(f"{base_title} ({label})" if label else base_title)[:200],
+                            caption=msg.text,
+                            media_type="link",
+                            url=url,
+                            file_name=file_name,
+                            mime_type=mime_type,
+                            date=msg.date.isoformat() if msg.date else None,
+                        ))
+
+                for item in items_to_add:
                     db.add(item)
                     saved += 1
 
