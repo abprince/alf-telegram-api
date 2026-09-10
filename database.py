@@ -27,6 +27,11 @@ class MediaItem(SQLModel, table=True):
     source_chat: Optional[str] = None
     source_message_id: Optional[int] = None
 
+    # For items delivered via a bot button: which button's payload this came
+    # from. Lets the scraper tell "already fetched episode 2" apart from
+    # "haven't tried episode 3 yet" when a single post has several buttons.
+    bot_payload: Optional[str] = None
+
     title: str
     caption: Optional[str] = None
     media_type: str  # "video", "document", "link"
