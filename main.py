@@ -7,11 +7,17 @@ load_dotenv()  # reads a local .env file if present; no-op on Render (uses dashb
 from fastapi import FastAPI, HTTPException, Header
 from fastapi.responses import StreamingResponse
 from sqlmodel import Session, select
+from sqlalchemy import or_
 
 from database import engine, init_db, MediaItem
 from scraper import build_client, scrape_channel, CHANNEL_USERNAME
 
 ADMIN_KEY = os.environ["ADMIN_KEY"]  # used to protect /admin/scrape from randoms
+
+# Channels post short promo clips and stickers as direct media alongside
+# real episodes (which usually only come through the bot). Anything smaller
+# than this, or a webm, is almost certainly not actual episode content.
+MIN_CONTENT_SIZE_BYTES = 50 * 1024 * 1024  # 50 MB
 
 telethon_client = None  # created on startup, reused for streaming
 
@@ -75,10 +81,17 @@ async def trigger_scrape(key: str):
 
 
 @app.get("/movies")
-def list_movies(skip: int = 0, limit: int = 50):
+def list_movies(skip: int = 0, limit: int = 50, include_all: bool = False):
     with Session(engine) as db:
+        query = select(MediaItem)
+        if not include_all:
+            query = query.where(
+                or_(MediaItem.file_size == None, MediaItem.file_size >= MIN_CONTENT_SIZE_BYTES)
+            ).where(
+                or_(MediaItem.mime_type == None, MediaItem.mime_type != "video/webm")
+            )
         items = db.exec(
-            select(MediaItem).offset(skip).limit(limit).order_by(MediaItem.id.desc())
+            query.offset(skip).limit(limit).order_by(MediaItem.id.desc())
         ).all()
         return items
 
