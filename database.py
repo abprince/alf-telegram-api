@@ -2,9 +2,13 @@ import os
 from typing import Optional
 from sqlmodel import SQLModel, Field, create_engine, Session
 
-# DATABASE_URL example (Neon/Supabase Postgres):
-# postgresql://user:password@host/dbname?sslmode=require
-DATABASE_URL = os.environ["DATABASE_URL"]
+DATABASE_URL = os.getenv("DATABASE_URL")
+
+if not DATABASE_URL:
+    raise RuntimeError(
+        "DATABASE_URL environment variable is not set. "
+        "Add DATABASE_URL in Render Environment Variables."
+    )
 
 # Postgres providers sometimes give "postgres://" — SQLAlchemy wants "postgresql://"
 if DATABASE_URL.startswith("postgres://"):
@@ -16,22 +20,21 @@ engine = create_engine(DATABASE_URL, echo=False)
 class MediaItem(SQLModel, table=True):
     id: Optional[int] = Field(default=None, primary_key=True)
 
-    # Telegram identifiers — needed to re-fetch/stream the file later
     channel_username: str = Field(index=True)
     message_id: int = Field(index=True)
 
     title: str
     caption: Optional[str] = None
-    media_type: str  # "video", "document", "link"
-    url: Optional[str] = None  # for plain links posted as text
+    media_type: str
+    url: Optional[str] = None
 
     file_name: Optional[str] = None
     mime_type: Optional[str] = None
-    file_size: Optional[int] = None  # bytes
-    duration: Optional[int] = None   # seconds, if available
+    file_size: Optional[int] = None
+    duration: Optional[int] = None
     thumbnail_path: Optional[str] = None
 
-    date: Optional[str] = None  # ISO string of when it was posted
+    date: Optional[str] = None
 
 
 def init_db():
