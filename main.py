@@ -1,6 +1,9 @@
 import os
 from contextlib import asynccontextmanager
 
+from dotenv import load_dotenv
+load_dotenv()  # reads a local .env file if present; no-op on Render (uses dashboard env vars instead)
+
 from fastapi import FastAPI, HTTPException, Header
 from fastapi.responses import StreamingResponse
 from sqlmodel import Session, select
@@ -31,7 +34,35 @@ def health():
     return {"status": "ok"}
 
 
-@app.post("/admin/scrape")
+@app.get("/admin/debug")
+async def debug_messages(key: str, limit: int = 5):
+    """
+    Shows the raw text/media/buttons of the last few channel messages,
+    so you can see exactly what the scraper has to work with.
+    """
+    if key != ADMIN_KEY:
+        raise HTTPException(status_code=403, detail="bad key")
+
+    from scraper import CHANNEL_USERNAME
+    results = []
+    async for msg in telethon_client.iter_messages(CHANNEL_USERNAME, limit=limit):
+        buttons = []
+        if msg.buttons:
+            for row in msg.buttons:
+                for b in row:
+                    buttons.append({"text": b.text, "url": getattr(b, "url", None)})
+
+        results.append({
+            "id": msg.id,
+            "text": msg.text,
+            "has_media": bool(msg.media),
+            "media_class": type(msg.media).__name__ if msg.media else None,
+            "buttons": buttons,
+        })
+    return results
+
+
+@app.get("/admin/scrape")
 async def trigger_scrape(key: str):
     """
     Call this from your external cron pinger (e.g. every 10-14 min).
@@ -70,8 +101,12 @@ async def stream_movie(item_id: int, range: str = Header(default=None)):
         if item.media_type not in ("video", "document"):
             raise HTTPException(status_code=400, detail="this item is a link, not a streamable file")
 
-    # Fetch the live message object again so Telethon has a fresh file reference
-    msg = await telethon_client.get_messages(CHANNEL_USERNAME, ids=item.message_id)
+    # Fetch the live message object again so Telethon has a fresh file reference.
+    # Uses source_chat, not the origin channel — bot-delivered items live in
+    # the bot's chat with your account, not in the channel itself.
+    fetch_chat = item.source_chat or item.channel_username
+    fetch_msg_id = item.source_message_id or item.message_id
+    msg = await telethon_client.get_messages(fetch_chat, ids=fetch_msg_id)
     if not msg or not msg.media:
         raise HTTPException(status_code=404, detail="media no longer available on Telegram")
 
