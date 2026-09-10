@@ -4,7 +4,7 @@ from sqlmodel import SQLModel, Field, create_engine, Session
 
 # DATABASE_URL example (Neon/Supabase Postgres):
 # postgresql://user:password@host/dbname?sslmode=require
-DATABASE_URL = os.environ["postgresql://neondb_owner:npg_W9qDTQEAawF8@ep-young-haze-ax45ubmy-pooler.c-4.us-east-2.aws.neon.tech/neondb?sslmode=require&channel_binding=require"]
+DATABASE_URL = os.environ["DATABASE_URL"]
 
 # Postgres providers sometimes give "postgres://" — SQLAlchemy wants "postgresql://"
 if DATABASE_URL.startswith("postgres://"):
