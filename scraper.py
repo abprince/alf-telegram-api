@@ -157,11 +157,12 @@ async def fetch_via_bot(client, bot_username, payload):
 
 async def scrape_channel(limit: int = 200) -> int:
     """
-    Fetches recent channel posts that aren't already processed. Posts with
-    a direct media/link get stored immediately. Posts whose only content is
-    a button deep-linking to a bot get the bot triggered (up to
-    MAX_BOT_FETCHES_PER_RUN per run) and the bot's reply is what actually
-    gets stored.
+    Fetches recent channel posts that aren't already fully processed. Posts
+    with direct media/link get stored immediately. Posts with buttons that
+    deep-link to a bot get EVERY button triggered (e.g. EP01, EP02, EP03...),
+    each up to MAX_BOT_FETCHES_PER_RUN per run, tracked individually by
+    payload so a partially-processed post picks up where it left off on the
+    next run instead of being skipped or re-fetched.
     """
     init_db()
     client = build_client()
@@ -170,65 +171,73 @@ async def scrape_channel(limit: int = 200) -> int:
 
     async with client:
         with Session(engine) as db:
-            existing_ids = set(
-                db.exec(
-                    select(MediaItem.message_id).where(
-                        MediaItem.channel_username == CHANNEL_USERNAME
-                    )
-                ).all()
-            )
+            existing_rows = db.exec(
+                select(MediaItem.message_id, MediaItem.bot_payload).where(
+                    MediaItem.channel_username == CHANNEL_USERNAME
+                )
+            ).all()
+
+            # message_ids fully covered by a direct media/link item (no button involved)
+            direct_done_ids = {mid for mid, payload in existing_rows if payload is None}
+
+            # payloads already fetched successfully, per message_id
+            done_payloads_by_msg = {}
+            for mid, payload in existing_rows:
+                if payload:
+                    done_payloads_by_msg.setdefault(mid, set()).add(payload)
 
             async for msg in client.iter_messages(CHANNEL_USERNAME, limit=limit):
-                if msg.id in existing_ids:
-                    continue
+                if msg.id in direct_done_ids:
+                    continue  # fully handled by direct media/link already
 
                 items_to_add = []
+                already_done = done_payloads_by_msg.get(msg.id, set())
 
-                # Case 1 & 2: direct media or a plain pasted link in the post itself
-                items_to_add.extend(
-                    build_item_from_message(msg, CHANNEL_USERNAME, msg.id, source_chat=CHANNEL_USERNAME)
-                )
+                # Case 1 & 2: direct media or a plain pasted link in the post itself.
+                # Only relevant the first time we see this message (no button progress yet).
+                if not already_done:
+                    direct_items = build_item_from_message(msg, CHANNEL_USERNAME, msg.id, source_chat=CHANNEL_USERNAME)
+                    items_to_add.extend(direct_items)
 
-                # Case 3: no direct content, but there's a button deep-linking to a bot
+                # Case 3: EVERY button on the post that deep-links to a bot
+                # (a single post often has EP01/EP02/EP03/... as separate buttons)
                 if not items_to_add and msg.buttons:
-                    if bot_fetches_used >= MAX_BOT_FETCHES_PER_RUN:
-                        continue  # save it for the next scrape run
-
-                    bot_username, payload = None, None
+                    stop = False
                     for row in msg.buttons:
-                        for b in row:
-                            url = getattr(b, "url", None)
-                            if url:
-                                bot_username, payload = parse_bot_deeplink(url)
-                                if bot_username:
-                                    break
-                        if bot_username:
+                        if stop:
                             break
+                        for b in row:
+                            if bot_fetches_used >= MAX_BOT_FETCHES_PER_RUN:
+                                stop = True
+                                break
 
-                    if bot_username and payload:
-                        bot_fetches_used += 1
-                        try:
-                            reply = await fetch_via_bot(client, bot_username, payload)
-                        except Exception:
-                            reply = None  # flood wait, bot needs subscribe, etc. — skip for now
+                            url = getattr(b, "url", None)
+                            if not url:
+                                continue
+                            bot_username, payload = parse_bot_deeplink(url)
+                            if not bot_username or not payload or payload in already_done:
+                                continue  # not a bot deep-link, or already fetched in a prior run
 
-                        if reply:
-                            title_hint = msg.text.splitlines()[0][:200] if msg.text and msg.text.strip() else None
-                            items_to_add.extend(
-                                build_item_from_message(
+                            bot_fetches_used += 1
+                            try:
+                                reply = await fetch_via_bot(client, bot_username, payload)
+                            except Exception:
+                                reply = None  # flood wait, needs subscribe, etc. — retry next run
+
+                            if reply:
+                                title_hint = b.text or (msg.text.splitlines()[0] if msg.text else None)
+                                new_items = build_item_from_message(
                                     reply, CHANNEL_USERNAME, msg.id,
                                     source_chat=bot_username, title_hint=title_hint,
                                 )
-                            )
+                                for it in new_items:
+                                    it.bot_payload = payload
+                                items_to_add.extend(new_items)
+                                already_done.add(payload)
 
                 for item in items_to_add:
                     db.add(item)
                     saved += 1
-
-                # mark this channel post as processed either way, so a failed
-                # bot fetch doesn't get retried every single run
-                if msg.id not in existing_ids and not items_to_add and msg.buttons:
-                    pass  # left unprocessed on purpose — will retry next run within the fetch budget
 
             db.commit()
 
